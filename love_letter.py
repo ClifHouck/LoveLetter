@@ -29,11 +29,103 @@ class Strategy(object):
 
     def play(self, player, game):
         card = self.get_discard(player, game)
-        player._discard(game, card)
-        card.discard(game   = game,
-                     player = player,
-                     target = self.get_target(player, game),
-                     guess  = self.get_guess(player, game))
+        player.discard(game, card)
+
+        target = None
+        if card.needs_target():
+            target = self.get_target(player, game)
+
+        guess = None
+        if card.needs_guess():
+            guess = self.get_guess(player, game)
+
+        card.apply_effect(game   = game,
+                          player = player,
+                          target = target,
+                          guess  = guess)
+
+PLAYER_PROMPT = '-->'
+
+class HumanTarget(object):
+    def get_input(self, player, game):
+        target_numbers = [p.number() for p in game.available_targets(player)]
+        print "HumanTarget: Available targets: " + str(target_numbers)
+
+        selection = raw_input(PLAYER_PROMPT)
+        number = None
+
+        try:
+            number = int(selection)
+        except ValueError:
+            print "HumanTarget: '" + selection + "' is not a number! Try again."
+            return None
+
+        if number not in target_numbers:
+            print "HumanTarget: '" + selection + "' is not a valid player to target. Try again."
+            return None
+
+        return number
+
+    def target(self, player, game):
+        selection = None
+        while selection is None:
+            selection = self.get_input(player, game)
+        return game.player(selection)
+
+class HumanGuess(object):
+    def get_input(self, player, game):
+        print "HumanGuess: State of everyone's discard pile: "
+
+        player_input = raw_input(PLAYER_PROMPT)
+
+        try:
+            guess = int(player_input)
+        except ValueError:
+            print "HumanGuess: '" + player_input + "' is not a valid number! Try again."
+            return None
+
+        if guess > Card.PRINCESS_NUM or guess < Card.GUARD_NUM:
+            print "HumanGuess: Guess must be a number between " + str(Card.GUARD_NUM) + " and " + str(Card.PRINCESS_NUM) + ". Try again."
+            return None
+
+        return guess
+
+    def guess(self, player, game):
+        guess = None
+        while guess is None:
+            guess = self.get_input(player, game)
+        return guess
+
+class HumanDiscard(object):
+    def get_input(self, player, game):
+        hand = player.hand()
+        hand_str = "[" + "0 - " + str(hand[0]) + " 1 - " + str(hand[1]) + "]"
+        print "HumanDiscard: Your hand: " + hand_str + ". Pick card 0 or card 1."
+
+        player_input = raw_input(PLAYER_PROMPT)
+
+        try:
+            choice = int(player_input)
+        except ValueError:
+            print "HumanDiscard: '" + player_input + "' is not a valid number! Try again."
+            return None
+
+        if choice != 0 and choice != 1:
+            print "HumanGuess: Choice must be either 0 or 1. Try again."
+            return None
+
+        return choice
+
+    def get_discard(self, player, game):
+        choice = None
+        while choice is None:
+            choice = self.get_input(player, game)
+        return player.hand()[choice]
+
+
+class HumanStrategy(Strategy):
+    def __init__(self):
+        super(HumanStrategy, self).__init__(HumanTarget(), HumanGuess(), HumanDiscard())
 
 class RandomDiscard(object):
     def get_discard(self, player, game):
@@ -78,9 +170,24 @@ class LowestDiscard(object):
         game.log("LowestDiscard: Discarding " + card.name() + "(" + str(card.number()) + "), since it is lowest card in the player's hand.")
         return card
 
+class HighestDiscard(object):
+    def get_discard(self, player, game):
+        hand = player.hand()
+
+        card = hand[1]
+        if hand[1].number() < hand[0].number():
+            card = hand[0]
+
+        game.log("HighestDiscard: Discarding " + card.name() + "(" + str(card.number()) + "), since it is highest card in the player's hand.")
+        return card
+
 class LowestDiscardStrategy(Strategy):
     def __init__(self):
         super(LowestDiscardStrategy, self).__init__(RandomTarget(), RandomGuess(), LowestDiscard())
+
+class HighestDiscardStrategy(Strategy):
+    def __init__(self):
+        super(HighestDiscardStrategy, self).__init__(RandomTarget(), RandomGuess(), HighestDiscard())
     
 class Player(object):
     def __init__(self, card, number, strategy):
@@ -104,11 +211,11 @@ class Player(object):
             numbers.append(card.number())
 
         # Sensei must be discarded if Manipulator or Hatamoto is in the player's hand.
-        if ((6 in numbers or 5 in numbers) and
-            7 in numbers):
+        if ((Card.MANIPULATOR_NUM in numbers or Card.HATAMOTO_NUM in numbers) and
+            Card.SENSEI_NUM in numbers):
             for card in self._hand:
                 if card.number() == 7:
-                    self._discard(game, card)
+                    self.discard(game, card)
                     return
 
         self._strat.play(self, game)
@@ -116,14 +223,21 @@ class Player(object):
     def hand_value(self):
         return self._hand[0].number()
 
-    def _discard(self, game, card):
+    def hand_str(self):
+        output = "["
+        for card in self._hand:
+            output += str(card) + " "
+        output += "]"
+        return output
+
+    def discard(self, game, card):
         self._hand.remove(card)
         self._discard_pile.append(card)
         game.log("Player " + str(self.number()) + " discarded the " + card.name() + " card.")
 
     def discard_hand(self, game):
         card = self._hand[0]
-        self._discard(game, card)
+        self.discard(game, card)
 
         # If the discarded card is the princess this player loses.
         if card.number() == 8:
@@ -168,7 +282,7 @@ class Card(object):
     COURTIER_NUM    = 2
     GUARD_NUM       = 1
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         pass
 
     def number(self):
@@ -177,75 +291,97 @@ class Card(object):
     def name(self):
         return self._name
 
+    def needs_guess(self):
+        return self._needs_guess
+
+    def needs_target(self):
+        return self._needs_target
+
     def __eq__(self, other):
         return self.number() == other.number()
 
+    def __str__(self):
+        return self._name + "(" + str(self._number) + ")"
+
 class Princess(Card):
     def __init__(self):
-        self._number = 8
-        self._name   = "Princess"
+        self._number       = 8
+        self._name         = "Princess"
+        self._needs_guess  = False
+        self._needs_target = False
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         game.lose(player)
 
 class Sensei(Card):
     def __init__(self):
         self._number = 7
         self._name   = "Sensei"
-
-    def discard(self, game, player, target, guess):
-        pass
+        self._needs_guess  = False
+        self._needs_target = False
 
 class Manipulator(Card):
     def __init__(self):
         self._number = 6
         self._name   = "Manipulator"
+        self._needs_guess  = False
+        self._needs_target = True
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         player.trade(target)
 
 class Hatamoto(Card):
     def __init__(self):
         self._number = 5
         self._name   = "Hatamoto"
+        self._needs_guess  = False
+        self._needs_target = True
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         target.discard_hand(game)
 
 class Shugenja(Card):
     def __init__(self):
         self._number = 4
         self._name   = "Shugenja"
+        self._needs_guess  = False
+        self._needs_target = False
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         game.protect(player)
 
 class Diplomat(Card):
     def __init__(self):
         self._number = 3
         self._name   = "Diplomat"
+        self._needs_guess  = False
+        self._needs_target = True
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         if player.hand_value() > target.hand_value(): 
             game.lose(target)
         elif target.hand_value() > player.hand_value():
             game.lose(player)
 
-class Coutier(Card):
+class Courtier(Card):
     def __init__(self):
         self._number = 2
-        self._name   = "Coutier"
+        self._name   = "Courtier"
+        self._needs_guess  = False
+        self._needs_target = True
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         player.look_at(target)
         game.log("Player " + str(player.number()) + " looked at " + str(target.number()) + "'s hand.")
 
 class Guard(Card):
     def __init__(self):
-        self._number = 1
-        self._name   = "Guard"
+        self._number        = 1
+        self._name          = "Guard"
+        self._needs_guess   = True
+        self._needs_target  = True
 
-    def discard(self, game, player, target, guess):
+    def apply_effect(self, game, player, target, guess):
         game.guess(target, guess)
 
 class Deck:
@@ -256,7 +392,7 @@ class Deck:
         Hatamoto(), Hatamoto(),
         Shugenja(), Shugenja(),
         Diplomat(), Diplomat(),
-        Coutier(),  Coutier(),
+        Courtier(), Courtier(),
         Guard(), Guard(), Guard(), Guard(), Guard()
     ]
 
@@ -269,7 +405,7 @@ class Deck:
     #     Card.DIPLOMAT_NUM, Card.DIPLOMAT_NUM, 
     #     Card.COURTIER_NUM, Card.COURTIER_NUM,
     #     Card.GUARD_NUM, Card.GUARD_NUM, Card.GUARD_NUM, Card.GUARD_NUM, Card.GUARD_NUM,
-   #  ]
+    # ]
 
     def __init__(self):
         self._cards = copy.deepcopy(Deck.CANONICAL_DECK)
@@ -348,6 +484,7 @@ class Game:
 
     def do_turn(self):
         current_player = self._players.pop(0)
+        self._current_player = current_player
         self.log("Player " + str(current_player.number()) + "'s turn.")
 
         # Protection ends on the player's next turn.
@@ -364,6 +501,8 @@ class Game:
             self._current_player_is_out = False
         else:
             self._players.append(current_player)
+
+        self._current_player = None
         self.log("Player " + str(current_player.number()) + "'s turn ended.")
 
 
@@ -406,8 +545,12 @@ class Game:
         for player in self._players:
             output += " " + str(player.number()) + ": "
             for card in player.hand():
-                output += card.name() + "(" + str(card.number()) + ")"
-            output += "\n"
+                output += str(card)
+
+            output += " Discard pile: ["
+            for card in player.discard_pile():
+                output += str(card) + " "
+            output += "]\n"
 
         output += ("Deck size: " + str(self._deck.size()) + "\n" +
                    "=== End Status ===\n")
@@ -423,9 +566,19 @@ class Game:
         self._burn_card = None
         return card
 
+    def player(self, number):
+        for p in self._players:
+            if number == p.number():
+                return p
+        if number == self._current_player.number():
+            return self._current_player
+
+        self.log_error("Tried to find a player, but got None!")
+        return None
+
 def play_game():
-    game = Game([RandomStrategy(),
-                 LowestDiscardStrategy()])
+    game = Game([LowestDiscardStrategy(),
+                 HumanStrategy()])
     while not game.is_game_over():
         print game.status()
         game.do_turn()
