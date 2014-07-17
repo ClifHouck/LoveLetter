@@ -14,8 +14,8 @@ class Strategy(object):
     def get_target(self, player, game):
         return self._target_strategy.target(player, game)
 
-    def get_guess(self, player, game):
-        return self._guess_strategy.guess(player, game)
+    def get_guess(self, player, target, game):
+        return self._guess_strategy.guess(player, target, game)
 
     def get_discard(self, player, game):
         return self._discard_strategy.get_discard(player, game)
@@ -37,7 +37,7 @@ class Strategy(object):
 
         guess = None
         if card.needs_guess():
-            guess = self.get_guess(player, game)
+            guess = self.get_guess(player, target, game)
 
         card.apply_effect(game   = game,
                           player = player,
@@ -90,7 +90,7 @@ class HumanGuess(object):
 
         return guess
 
-    def guess(self, player, game):
+    def guess(self, player, target, game):
         guess = None
         while guess is None:
             guess = self.get_input(player, game)
@@ -136,7 +136,7 @@ class RandomTarget(object):
         return random.choice(game.available_targets(player)) 
 
 class RandomGuess(object):
-    def guess(self, player, game):
+    def guess(self, player, target, game):
         return random.randrange(2, 8, 1)
 
 class RandomStrategy(Strategy):
@@ -144,17 +144,10 @@ class RandomStrategy(Strategy):
         super(RandomStrategy, self).__init__(RandomTarget(), RandomGuess(), RandomDiscard())
 
 class ExamineDiscardedCardsGuess(object):
-    def guess(self, player, game):
-        all_discarded_cards = []
-        for player in game.players():
-            all_discarded_cards += player.discard_pile()
-        discarded_cards = [card.number() for card in all_discarded_cards]
-        game.log("ExamineDiscardedCardsGuess: Discard: " + str(discarded_cards))
-
-        canon_deck = [card.number() for card in Deck.CANONICAL_DECK]
-        whats_left = collections.Counter(canon_deck) - collections.Counter(discarded_cards)
-        del whats_left[1]
-        game.log("ExamineDiscardedCardsGuess: " + str(whats_left))
+    def guess(self, player, target, game):
+        whats_left = get_remaining_cards_counter(player, game)
+        # Remove the Guard from consideration.
+        del whats_left[Card.GUARD_NUM]
         guess = whats_left.most_common(1)[0][0]
         game.log("ExamineDiscardedCardsGuess: Guessing " + str(guess))
         return guess
@@ -188,6 +181,94 @@ class LowestDiscardStrategy(Strategy):
 class HighestDiscardStrategy(Strategy):
     def __init__(self):
         super(HighestDiscardStrategy, self).__init__(RandomTarget(), RandomGuess(), HighestDiscard())
+
+def get_remaining_cards_counter(player, game):
+    all_discarded_cards = []
+    for p in game.players():
+        all_discarded_cards += p.discard_pile()
+    all_discarded_cards += player.discard_pile()
+    discarded_cards  = [card.number() for card in all_discarded_cards]
+    print "get_remaining_cards_counter: " + str(discarded_cards)
+
+    # The player's hand also gives us information.
+    discarded_cards.append(player.hand()[0].number())
+
+    whats_left = Deck.CANONICAL_DECK_COUNT - collections.Counter(discarded_cards)
+    return whats_left
+
+def num_indeterminate_cards(player, game):
+    """ Returns the sum of the number of cards that a player cannot directly see, whether because they are in another player's hand,
+        awaiting to be drawn, or if the burn card has not been drawn. """
+    burn_card = 1 
+    if game.burn_card() is None:
+        burn_card = 0
+    print str(game.deck().size()), str(len(game.players())), str(burn_card)
+    return game.deck().size() + len(game.players()) + burn_card
+
+def best_pure_guess(player, game):
+    """ Guesses the most probable card regardless of target based only on these two criteria:
+        - What cards are visible in the discard piles.
+        - What card is in this player's hand.
+        Returns a tuple of (set of cards with same remaining frequency, likelyhood of guessing correctly based on criteria used.)
+    """
+    whats_left = get_remaining_cards_counter(player, game)
+    del whats_left[Card.GUARD_NUM]
+    remaining_counts = whats_left.most_common()
+
+    # There are only guards left in this case.
+    if len(remaining_counts) == 0: 
+        return [[1], 1]
+
+    game.log("best_pure_guess: " + str(remaining_counts))
+    best_card_numbers = []
+    best_count = remaining_counts[0][1]
+    for count_pair in remaining_counts:
+        if count_pair[1] == best_count:
+            best_card_numbers.append(count_pair[0])
+        else:
+            break
+    game.log("best_pure_guess: " + str(best_count) + " / " + str(num_indeterminate_cards(player, game)))
+    return [best_card_numbers, float(best_count) / num_indeterminate_cards(player, game)]
+
+def sensei_discard_guess(player, target, game):
+    # TODO
+    return [[5, 6, 8], 0.0]
+
+class BestGuess(object):
+    """ This guessing strategy attempts to take the following into account when making a guess:
+        - All seen cards = {Discarded cards} U {card in hand}
+        - Seen hands 
+        - Specific discarded cards: { Sensei }
+    """
+    def guess(self, player, target, game):
+        # If we've seen the target's hand, and we're sure they still have the card, then
+        # knock that sucker out!
+        seen_card, target_has_seen_card = self.ponder_seen_hands(player, target, game)
+        if target_has_seen_card:
+            return seen_card
+
+        # FIXME: Not sure about the pure_guess vs. sensei_discard_guess logic below.
+        pure_guesses,           pure_likelyhood   = best_pure_guess(player, game)
+        game.log("BestGuessStrategy: " + str(pure_guesses) + " " + str(pure_likelyhood) + "\n")
+        sensei_discard_guesses, sensei_likelyhood = sensei_discard_guess(player, target, game)
+        # If it seems more probable that the sensei discard was forced AND it's better than a pure guess, then use that guess.
+        if sensei_likelyhood > pure_likelyhood:
+            return random.choice(sensei_card_guess)
+        selection = random.choice(pure_guesses)
+
+        if selection == Card.GUARD_NUM:
+            game.log("BestGuess: Only guards remain! Returning a random guess because guessing Guard is illegal.")
+            return RandomGuess.guess()
+
+        return selection
+
+    def ponder_seen_hands(self, player, target, game):
+        # TODO: fill-in, move to Player class.
+        return [[1], False]
+
+class BestGuessStrategy(Strategy):
+    def __init__(self):
+        super(BestGuessStrategy, self).__init__(RandomTarget(), BestGuess(), LowestDiscard())
     
 class Player(object):
     def __init__(self, card, number, strategy):
@@ -214,7 +295,7 @@ class Player(object):
         if ((Card.MANIPULATOR_NUM in numbers or Card.HATAMOTO_NUM in numbers) and
             Card.SENSEI_NUM in numbers):
             for card in self._hand:
-                if card.number() == 7:
+                if card.number() == Card.SENSEI_NUM:
                     self.discard(game, card)
                     return
 
@@ -396,6 +477,8 @@ class Deck:
         Guard(), Guard(), Guard(), Guard(), Guard()
     ]
 
+    CANONICAL_DECK_COUNT = collections.Counter([card.number() for card in CANONICAL_DECK])
+
     # CANONICAL_DECK = [
     #     Card.PRINCESS_NUM,
     #     Card.SENSEI_NUM,
@@ -566,6 +649,9 @@ class Game:
         self._burn_card = None
         return card
 
+    def burn_card(self):
+        return self._burn_card
+
     def player(self, number):
         for p in self._players:
             if number == p.number():
@@ -578,7 +664,7 @@ class Game:
 
 def play_game():
     game = Game([LowestDiscardStrategy(),
-                 HumanStrategy()])
+                BestGuessStrategy()])
     while not game.is_game_over():
         print game.status()
         game.do_turn()
